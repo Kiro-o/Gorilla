@@ -1,0 +1,266 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: phone_lookup/{phoneNumber}
+    // Document ID: string (cleaned phone number string, e.g. 01012345678 or +1234567890)
+    // Fields:
+    //   - email: string (required, 1-120 chars, valid email format)
+    //   - uid: string (required, 1-128 chars, Firebase Auth UID, immutable)
+    //   - name: string (required, 1-100 chars, athlete full name)
+    //   - phone: string (optional, 1-30 chars, matches doc ID if present)
+    //   - createdAt: number (optional, epoch timestamp >= 0, immutable)
+    //
+    // Collection: users/{userId}
+    // Document ID: string (userId, matches Firebase Auth request.auth.uid)
+    // Fields:
+    //   - uid: string (required, 1-128 chars, matches userId, immutable)
+    //   - name: string (required, 1-100 chars, athlete display name)
+    //   - email: string (required, 1-120 chars, valid email format)
+    //   - phone: string (optional, 0-30 chars, normalized phone)
+    //   - groupId: string (optional, 1-50 chars, gym room/squad code)
+    //   - avatar: string (optional, 1-50 chars, emoji or avatar identifier)
+    //   - createdAt: number (optional, epoch timestamp >= 0, immutable)
+    //   - lastActive: number (optional, epoch timestamp >= 0)
+    //   - updatedAt: number (optional, epoch timestamp >= 0)
+    //   - isFirebaseUser: bool (optional)
+    //   - userId: string (optional, 1-128 chars, matches userId)
+    //   - userName: string (optional, 1-100 chars)
+    //   - totalVolume: number (optional, >= 0)
+    //   - totalSets: number (optional, >= 0)
+    //   - best1RM: number (optional, >= 0)
+    //   - maxLifts: map (optional, PR statistics by exercise)
+    //
+    // Subcollection: users/{userId}/logs/{logId}
+    // Document ID: string (logId)
+    // Fields:
+    //   - id: string (optional, 1-100 chars)
+    //   - exerciseId: string (required, 1-100 chars)
+    //   - setNumber: number (optional, >= 0)
+    //   - weight: number (required, >= 0)
+    //   - reps: number (required, >= 0)
+    //   - date: string (optional, <= 25 chars, YYYY-MM-DD)
+    //   - timestamp: number (optional, >= 0)
+    //   - notes: string (optional, <= 500 chars)
+    //
+    // Subcollection: leaderboards/{roomCode}/members/{memberId}
+    // Document ID: string (memberId, matches request.auth.uid)
+    // Fields:
+    //   - userId: string (required, 1-128 chars, matches memberId, immutable)
+    //   - userName: string (required, 1-100 chars)
+    //   - groupId: string (optional, 1-50 chars)
+    //   - roomCode: string (optional, 1-50 chars)
+    //   - avatar: string (optional, 1-50 chars)
+    //   - totalVolume: number (required, >= 0)
+    //   - totalSets: number (required, >= 0)
+    //   - best1RM: number (required, >= 0)
+    //   - lastActive: number (optional, epoch timestamp >= 0)
+    //   - updatedAt: number (optional, epoch timestamp >= 0)
+    //   - maxLifts: map (optional, PR breakdown)
+    //
+    // Collection: gym_groups/{groupId} (backward compatibility)
+    // Subcollections:
+    //   - gym_groups/{groupId}/members/{userId}
+    //   - gym_groups/{groupId}/activity/{activityId}
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+             email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidPhoneLookup(data, phoneNumber) {
+      return data.keys().hasAll(['email', 'uid', 'name']) &&
+             data.keys().hasOnly(['email', 'uid', 'name', 'phone', 'createdAt']) &&
+             data.email is string && isValidEmail(data.email) && data.email.size() <= 120 &&
+             data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 30 && data.phone == phoneNumber)) &&
+             (!('createdAt' in data) || (data.createdAt is number && data.createdAt >= 0));
+    }
+
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'email']) &&
+             data.keys().hasOnly([
+               'uid', 'userId', 'name', 'userName', 'phone', 'email',
+               'groupId', 'avatar', 'createdAt', 'lastActive', 'updatedAt',
+               'isFirebaseUser', 'totalVolume', 'totalSets', 'best1RM', 'maxLifts'
+             ]) &&
+             data.uid is string && data.uid == userId && data.uid.size() <= 128 &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.email is string && isValidEmail(data.email) && data.email.size() <= 120 &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 30)) &&
+             (!('userId' in data) || (data.userId is string && data.userId == userId)) &&
+             (!('userName' in data) || (data.userName is string && data.userName.size() <= 100)) &&
+             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 50)) &&
+             (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 50)) &&
+             (!('createdAt' in data) || (data.createdAt is number && data.createdAt >= 0)) &&
+             (!('lastActive' in data) || (data.lastActive is number && data.lastActive >= 0)) &&
+             (!('updatedAt' in data) || (data.updatedAt is number && data.updatedAt >= 0)) &&
+             (!('isFirebaseUser' in data) || (data.isFirebaseUser is bool)) &&
+             (!('totalVolume' in data) || (data.totalVolume is number && data.totalVolume >= 0)) &&
+             (!('totalSets' in data) || (data.totalSets is number && data.totalSets >= 0)) &&
+             (!('best1RM' in data) || (data.best1RM is number && data.best1RM >= 0)) &&
+             (!('maxLifts' in data) || (data.maxLifts is map));
+    }
+
+    function isValidUserLog(data) {
+      return data.keys().hasAll(['exerciseId', 'weight', 'reps']) &&
+             data.keys().hasOnly(['id', 'exerciseId', 'setNumber', 'weight', 'reps', 'date', 'timestamp', 'notes']) &&
+             data.exerciseId is string && data.exerciseId.size() > 0 && data.exerciseId.size() <= 100 &&
+             data.weight is number && data.weight >= 0 &&
+             data.reps is number && data.reps >= 0 &&
+             (!('id' in data) || (data.id is string && data.id.size() <= 100)) &&
+             (!('setNumber' in data) || (data.setNumber is number && data.setNumber >= 0)) &&
+             (!('date' in data) || (data.date is string && data.date.size() <= 25)) &&
+             (!('timestamp' in data) || (data.timestamp is number && data.timestamp >= 0)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 500));
+    }
+
+    function isValidLeaderboardMember(data, memberId) {
+      return data.keys().hasAll(['userId', 'userName', 'totalVolume', 'totalSets', 'best1RM']) &&
+             data.keys().hasOnly([
+               'userId', 'userName', 'groupId', 'roomCode', 'avatar',
+               'totalVolume', 'totalSets', 'best1RM', 'lastActive', 'maxLifts', 'updatedAt'
+             ]) &&
+             ('groupId' in data || 'roomCode' in data) &&
+             data.userId is string && data.userId == memberId && data.userId.size() <= 128 &&
+             data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 100 &&
+             data.totalVolume is number && data.totalVolume >= 0 &&
+             data.totalSets is number && data.totalSets >= 0 &&
+             data.best1RM is number && data.best1RM >= 0 &&
+             (!('groupId' in data) || (data.groupId is string && data.groupId.size() <= 50)) &&
+             (!('roomCode' in data) || (data.roomCode is string && data.roomCode.size() <= 50)) &&
+             (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 50)) &&
+             (!('lastActive' in data) || (data.lastActive is number && data.lastActive >= 0)) &&
+             (!('updatedAt' in data) || (data.updatedAt is number && data.updatedAt >= 0)) &&
+             (!('maxLifts' in data) || (data.maxLifts is map));
+    }
+
+    function isValidMemberData(data) {
+      return data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128 &&
+             data.userName is string && data.userName.size() > 0 && data.userName.size() <= 60 &&
+             data.groupId is string && data.groupId.size() > 0 && data.groupId.size() <= 50 &&
+             data.totalVolume is number && data.totalVolume >= 0 &&
+             data.totalSets is number && data.totalSets >= 0 &&
+             data.best1RM is number && data.best1RM >= 0;
+    }
+
+    // ===============================================================
+    // Rules Definition
+    // ===============================================================
+
+    // 1. Phone Lookup mapping collection for Phone-based auth & recovery
+    match /phone_lookup/{phoneNumber} {
+      // Public read required for unauthenticated phone-to-email resolution and password recovery
+      allow read: if true;
+
+      // Create allowed with valid schema; binds to request.auth.uid if user is already authenticated
+      allow create: if isValidPhoneLookup(request.resource.data, phoneNumber) &&
+                       (!isAuthenticated() || request.resource.data.uid == request.auth.uid);
+
+      // Updates restricted exclusively to the owning athlete; protects immutable fields
+      allow update: if isAuthenticated() &&
+                       request.auth.uid == resource.data.uid &&
+                       isValidPhoneLookup(request.resource.data, phoneNumber) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
+
+      // Deletion restricted to the owning athlete
+      allow delete: if isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    // 2. Athlete Profiles & Subcollections
+    match /users/{userId} {
+      // Authenticated users can read athlete profiles in the gym community
+      allow read: if isAuthenticated();
+
+      // Only the authenticated account owner can create or update their profile
+      allow create: if isOwner(userId) &&
+                       isValidUser(request.resource.data, userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidUser(request.resource.data, userId) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
+
+      allow delete: if isOwner(userId);
+
+      // Workout set logs subcollection (strictly private to the user)
+      match /logs/{logId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidUserLog(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // 3. Room Leaderboards & Member Rankings
+    match /leaderboards/{roomCode} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+
+      // Individual member rank record within squad leaderboard
+      match /members/{memberId} {
+        allow read: if true;
+
+        allow create: if isAuthenticated() &&
+                         (request.auth.uid == memberId || request.auth.uid == request.resource.data.userId) &&
+                         isValidLeaderboardMember(request.resource.data, memberId);
+
+        allow update: if isAuthenticated() &&
+                         (request.auth.uid == memberId || request.auth.uid == resource.data.userId) &&
+                         isValidLeaderboardMember(request.resource.data, memberId) &&
+                         request.resource.data.userId == resource.data.userId;
+
+        allow delete: if false;
+      }
+    }
+
+    // 4. Gym squad groups (backward compatibility)
+    match /gym_groups/{groupId} {
+      allow read: if true;
+      allow write: if true;
+
+      // Group members leaderboard records
+      match /members/{userId} {
+        allow read: if true;
+        allow create, update: if isValidMemberData(request.resource.data);
+        allow delete: if false;
+      }
+
+      // Live activity feed
+      match /activity/{activityId} {
+        allow read: if true;
+        allow create: if request.resource.data.userId is string &&
+                         request.resource.data.weight is number &&
+                         request.resource.data.reps is number;
+        allow update, delete: if false;
+      }
+    }
+
+    // Default deny for all other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
